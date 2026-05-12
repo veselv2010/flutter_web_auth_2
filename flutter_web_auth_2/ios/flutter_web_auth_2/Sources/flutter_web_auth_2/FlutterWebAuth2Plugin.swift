@@ -12,6 +12,7 @@ public class FlutterWebAuth2Plugin: NSObject, FlutterPlugin {
     }
 
     var completionHandler: ((URL?, Error?) -> Void)?
+    private var anchorProvider: NSObject?
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         if call.method == "authenticate",
@@ -24,6 +25,7 @@ public class FlutterWebAuth2Plugin: NSObject, FlutterPlugin {
             var sessionToKeepAlive: Any? // if we do not keep the session alive, it will get closed immediately while showing the dialog
             completionHandler = { (url: URL?, err: Error?) in
                 self.completionHandler = nil
+                self.anchorProvider = nil
 
                 if (sessionToKeepAlive != nil) {
                     if #available(iOS 12, *) {
@@ -87,12 +89,12 @@ public class FlutterWebAuth2Plugin: NSObject, FlutterPlugin {
                     if (callbackURLScheme == "https") {
                         guard let host = options["httpsHost"] as? String else {
                             result(FlutterError.invalidHttpsHostError)
-                            return 
+                            return
                         }
 
                         guard let path = options["httpsPath"] as? String else {
                             result(FlutterError.invalidHttpsPathError)
-                            return 
+                            return
                         }
 
                         _session = ASWebAuthenticationSession(url: url, callback: ASWebAuthenticationSession.Callback.https(host: host, path: path), completionHandler: completionHandler!)
@@ -105,34 +107,24 @@ public class FlutterWebAuth2Plugin: NSObject, FlutterPlugin {
                 let session = _session!
 
                 if #available(iOS 13, *) {
-                    var rootViewController: UIViewController? = nil
-
-                    // FlutterViewController
-                    if (rootViewController == nil) {
-                        rootViewController = UIApplication.shared.delegate?.window??.rootViewController as? FlutterViewController
+                    guard let keyWindow = Self.resolveKeyWindow() else {
+                        result(FlutterError.acquireRootViewControllerFailed)
+                        return
                     }
-
-                    // UIViewController
-                    if (rootViewController == nil) {
-                        rootViewController = UIApplication.shared.keyWindow?.rootViewController
-                    }
-
-                    // ACQUIRE_ROOT_VIEW_CONTROLLER_FAILED
-                    if (rootViewController == nil) {
+                    guard let rootViewController = keyWindow.rootViewController else {
                         result(FlutterError.acquireRootViewControllerFailed)
                         return
                     }
 
-                    while let presentedViewController = rootViewController!.presentedViewController {
-                        rootViewController = presentedViewController
-                    }
-                    if let nav = rootViewController as? UINavigationController {
-                        rootViewController = nav.visibleViewController ?? rootViewController
-                    }
+                    let topController = Self.topVisibleController(from: rootViewController)
 
-                    guard let contextProvider = rootViewController as? ASWebAuthenticationPresentationContextProviding else {
-                        result(FlutterError.acquireRootViewControllerFailed)
-                        return
+                    let contextProvider: ASWebAuthenticationPresentationContextProviding
+                    if let flutterContext = topController as? ASWebAuthenticationPresentationContextProviding {
+                        contextProvider = flutterContext
+                    } else {
+                        let provider = WindowAnchorProvider(anchor: keyWindow)
+                        self.anchorProvider = provider
+                        contextProvider = provider
                     }
                     session.presentationContextProvider = contextProvider
                     if let preferEphemeral = options["preferEphemeral"] as? Bool {
@@ -172,12 +164,58 @@ public class FlutterWebAuth2Plugin: NSObject, FlutterPlugin {
             default: return false
         }
     }
+
+    @available(iOS 13.0, *)
+    private static func resolveKeyWindow() -> UIWindow? {
+        let windowScenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+
+        let activeScene = windowScenes.first(where: { $0.activationState == .foregroundActive })
+            ?? windowScenes.first(where: { $0.activationState == .foregroundInactive })
+            ?? windowScenes.first
+
+        if let scene = activeScene {
+            if let keyWindow = scene.windows.first(where: { $0.isKeyWindow }) {
+                return keyWindow
+            }
+            if let visibleWindow = scene.windows.first(where: { !$0.isHidden }) {
+                return visibleWindow
+            }
+            return scene.windows.first
+        }
+
+        return UIApplication.shared.delegate?.window ?? nil
+    }
+
+    private static func topVisibleController(from root: UIViewController) -> UIViewController {
+        var controller = root
+        while let presented = controller.presentedViewController {
+            controller = presented
+        }
+        if let nav = controller as? UINavigationController, let visible = nav.visibleViewController {
+            controller = visible
+        }
+        return controller
+    }
 }
 
 @available(iOS 13, *)
 extension FlutterViewController: ASWebAuthenticationPresentationContextProviding {
     public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
         return view.window!
+    }
+}
+
+@available(iOS 13.0, *)
+private final class WindowAnchorProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+    let anchor: ASPresentationAnchor
+
+    init(anchor: ASPresentationAnchor) {
+        self.anchor = anchor
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        return anchor
     }
 }
 
